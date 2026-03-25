@@ -1,5 +1,5 @@
 # ==============================================================================
-# Partial Correlation Analysis: TE Element vs Regulator Genes
+# Partial Correlation Analysis: TE Element vs Drug Response
 # Control for: Age, Gender, Plate and Tumor Purity
 # ==============================================================================
 
@@ -12,39 +12,58 @@ suppressPackageStartupMessages({
   library(parallel)
   library(ppcor)
 })
-args=commandArgs(T)
+
+args <- commandArgs(T)
 
 # ==============================================================================
 # Configuration
 # ==============================================================================
 
 software <- "SQuIRE"
-max_cores <- 60
+max_cores <- 50
 
 # Set working directory
-setwd("/data/whu/home/ATEC/resutls/2_regulator_TE_cor_SQuIRE")
+setwd("/data/whu/home/ATEC/resutls/4_drug_TE_cor_SQuIRE")
 
 # ==============================================================================
 # Load Reference Data
 # ==============================================================================
 
+# Drug response data
+load("/home/whu/whu/tcga_project/TCGA_drug/pan_CTRP1_Log2.RData")
+ctrp1 <- as.data.frame(pan_CTRP1_Log2)
+load("/home/whu/whu/tcga_project/TCGA_drug/pan_CTRP2_Log2.RData")
+ctrp2 <- as.data.frame(pan_CTRP2_Log2)
+load("/home/whu/whu/tcga_project/TCGA_drug/pan_GDSC1_Log2.RData")
+gdsc1 <- as.data.frame(pan_GDSC1_Log2)
+load("/home/whu/whu/tcga_project/TCGA_drug/pan_GDSC2_Log2.RData")
+gdsc2 <- as.data.frame(pan_GDSC2_Log2)
+
+# Add database labels
+rownames(ctrp1) <- paste0("CTRP1_", rownames(ctrp1))
+rownames(ctrp2) <- paste0("CTRP2_", rownames(ctrp2))
+rownames(gdsc1) <- paste0("GDSC1_", rownames(gdsc1))
+rownames(gdsc2) <- paste0("GDSC2_", rownames(gdsc2))
+
+# Merge drug data
+drug <- rbind(ctrp1, ctrp2, gdsc1, gdsc2)
+colnames(drug) <- gsub("\\.", "-", colnames(drug))
+
+# Clean up
+rm(ctrp1, ctrp2, gdsc1, gdsc2, pan_CTRP1_Log2, pan_CTRP2_Log2, 
+   pan_GDSC1_Log2, pan_GDSC2_Log2)
+gc()
+
 # TE expression files
 Dir <- paste0("/data/whu/home/te_database/results/1_merge_expression/filtered_", software)
 files <- list.files(path = Dir, pattern = "_TE_fpkm_filtered.txt")
-
-# Regulator gene lists
-TF <- data.table::fread("/data/whu/home/te_database/data/TF list.txt", 
-                        header = T, data.table = F, check.names = F)
-RBP <- data.table::fread("/data/whu/home/te_database/data/RBP_union_list.txt", 
-                         header = T, data.table = F, check.names = F)
-regulator <- union(TF$gene_name, RBP$gene_name)
 
 # ==============================================================================
 # Function: Calculate Partial Correlation
 # ==============================================================================
 
-# Calculate partial correlation pairwise
-calc_partial_cor_single_te <- function(te_expr, gene_expr_matrix, covariates_matrix) {
+# Calculate partial correlation for a single TE against all drugs
+calc_partial_cor_single_te <- function(te_expr, drug_expr_matrix, covariates_matrix) {
   
   # Check if Gender and Plate have only one level
   gender_levels <- length(unique(covariates_matrix$gender))
@@ -63,40 +82,36 @@ calc_partial_cor_single_te <- function(te_expr, gene_expr_matrix, covariates_mat
   
   # Add plate dummies if needed
   if(plate_levels > 1) {
-    
     # Create dummy variables (k-1 dummies for k levels)
-    # Using model.matrix and removing intercept
     plate_dummies <- model.matrix(~ plate, data = covariates_matrix)
-    
     # Remove intercept column
     plate_dummies <- plate_dummies[, -1, drop = FALSE]
-    
     # Combine with other covariates
     covariates_numeric <- cbind(covariates_numeric, plate_dummies)
   }
   
   te_expr_vec <- as.numeric(te_expr)
-  n_genes <- nrow(gene_expr_matrix)
+  n_drugs <- nrow(drug_expr_matrix)
   
   results <- data.frame(
-    Gene_id = rownames(gene_expr_matrix),
-    cor = numeric(n_genes),
-    pvalue = numeric(n_genes),
+    Drug_id = rownames(drug_expr_matrix),
+    cor = numeric(n_drugs),
+    pvalue = numeric(n_drugs),
     stringsAsFactors = FALSE
   )
   
-  # Calculate for each gene
-  for (j in 1:n_genes) {
-    gene_expr_vec <- as.numeric(gene_expr_matrix[j, ])
+  # Calculate for each drug
+  for (j in 1:n_drugs) {
+    drug_expr_vec <- as.numeric(drug_expr_matrix[j, ])
     
-    # Combine data: 1 TE + 1 regulator + covariates
-    data_subset <- cbind(te_expr_vec, gene_expr_vec, covariates_numeric)
+    # Combine data: 1 TE + 1 drug + covariates
+    data_subset <- cbind(te_expr_vec, drug_expr_vec, covariates_numeric)
     
     tryCatch({
       # Calculate partial correlation (spearman)
       pcor_result <- pcor(data_subset, method = "spearman")
       
-      # Extract partial correlation between TE (column 1) and gene (column 2)
+      # Extract partial correlation between TE (column 1) and drug (column 2)
       results$cor[j] <- pcor_result$estimate[1, 2]
       results$pvalue[j] <- pcor_result$p.value[1, 2]
       
@@ -113,7 +128,7 @@ calc_partial_cor_single_te <- function(te_expr, gene_expr_matrix, covariates_mat
 # Function: Batch Processing for Multiple TEs
 # ==============================================================================
 
-calc_partial_cor_batch <- function(te_expr_matrix, gene_expr_matrix, 
+calc_partial_cor_batch <- function(te_expr_matrix, drug_expr_matrix, 
                                    covariates_matrix, te_chunk) {
   # Process a chunk of TEs
   
@@ -125,7 +140,7 @@ calc_partial_cor_batch <- function(te_expr_matrix, gene_expr_matrix,
     # Calculate correlation
     te_results <- calc_partial_cor_single_te(
       te_expr = te_expr_matrix[i, ],
-      gene_expr_matrix = gene_expr_matrix,
+      drug_expr_matrix = drug_expr_matrix,
       covariates_matrix = covariates_matrix
     )
     
@@ -139,7 +154,6 @@ calc_partial_cor_batch <- function(te_expr_matrix, gene_expr_matrix,
 # ==============================================================================
 # Main Analysis Loop: Process Each Cancer Type
 # ==============================================================================
-
 
 f <- args[1]
 Cancer <- gsub("_TE_fpkm_filtered.txt", "", f)
@@ -170,24 +184,14 @@ rownames(exp_cancer) <- exp_cancer[, 1]
 exp_cancer <- exp_cancer[, -1]
 exp_cancer <- exp_cancer[, substr(colnames(exp_cancer), 14, 15) == "01"]  # primary tumors
 
-# Gene expression
-exp_PC <- data.table::fread(
-  paste0("/data/whu/home/te_database/results/0_TCGA_geneExp/", Cancer, "_geneExp.txt"), 
-  header = T, data.table = F, check.names = F
-)
-exp_PC[, 1] <- gsub(".*\\|", "", exp_PC[, 1])
-exp_PC <- exp_PC[!duplicated(exp_PC[, 1]), ]
-rownames(exp_PC) <- exp_PC[, 1]
-exp_PC <- exp_PC[, -1]
-exp_PC <- exp_PC[rownames(exp_PC) %in% regulator, ]  # keep only regulators
-
 # ----------------------------------------------------------------------------
 # Sample Matching & Filtering
 # ----------------------------------------------------------------------------
 
-# Match samples
-shared_sample <- intersect(colnames(exp_PC), colnames(exp_cancer))
-exp_PC <- exp_PC[, shared_sample]
+# Match samples between drug response and TE expression
+shared_sample <- intersect(colnames(drug), colnames(exp_cancer))
+
+exp_drug <- drug[, shared_sample]
 exp_cancer <- exp_cancer[, shared_sample]
 
 # ----------------------------------------------------------------------------
@@ -222,22 +226,19 @@ covariates$gender <- ifelse(covariates$gender == "MALE", 1, 0)
 # Plate: convert to factor
 n_plates <- length(unique(covariates$plate))
 cat(sprintf("Unique plates: %d\n", n_plates))
-
 covariates$plate <- as.factor(covariates$plate)
 
-exp_PC <- exp_PC[, covariates$sample_id]
+# Filter data to samples with complete covariates
+exp_drug <- exp_drug[, covariates$sample_id]
 exp_cancer <- exp_cancer[, covariates$sample_id]
-
-# Filter low expression genes
-exp_PC <- exp_PC[apply(exp_PC, 1, function(x) {mean(x) > 1}), ]
 
 # ----------------------------------------------------------------------------
 # Summary Statistics
 # ----------------------------------------------------------------------------
 
-cat(sprintf("Final samples: %d\n", ncol(exp_PC)))
+cat(sprintf("Final samples: %d\n", ncol(exp_drug)))
 cat(sprintf("Final TEs: %d\n", nrow(exp_cancer)))
-cat(sprintf("Final genes: %d\n", nrow(exp_PC)))
+cat(sprintf("Final drugs: %d\n", nrow(exp_drug)))
 
 # ----------------------------------------------------------------------------
 # Parallel Computation
@@ -259,7 +260,7 @@ result_list <- mclapply(
   function(chunk) {
     calc_partial_cor_batch(
       te_expr_matrix = exp_cancer,
-      gene_expr_matrix = exp_PC,
+      drug_expr_matrix = exp_drug,
       covariates_matrix = covariates,
       te_chunk = chunk
     )
@@ -273,7 +274,7 @@ result_list <- mclapply(
 
 cat("Merging results...\n")
 rt_cor_total <- do.call(rbind, result_list)
-rt_cor_total <- rt_cor_total[, c("TE_id", "Gene_id", "cor", "pvalue")]
+rt_cor_total <- rt_cor_total[, c("TE_id", "Drug_id", "cor", "pvalue")]
 
 # FDR correction
 rt_cor_total$fdr <- p.adjust(rt_cor_total$pvalue, method = "fdr")
@@ -300,16 +301,15 @@ cat(sprintf("Significant (FDR < 0.05): %d (%.1f%%)\n",
 # Export Results
 # ----------------------------------------------------------------------------
 
-# Significant table
-rt_cor_sig <- rt_cor_total[abs(rt_cor_total$cor) > 0.3 & rt_cor_total$fdr < 0.05,]
-
-output_file <- paste0(Cancer, "_regulator_TE_element_cor.txt")
-write.table(rt_cor_sig, output_file, sep = "\t", row.names = FALSE, quote = FALSE)
-cat(sprintf("Results saved: %s\n", output_file))
+# Significant results only
+rt_cor_sig <- rt_cor_total[abs(rt_cor_total$cor) > 0.3 & rt_cor_total$fdr < 0.05, ]
+output_file_sig <- paste0(Cancer, "_drug_TE_element_cor.txt")
+write.table(rt_cor_sig, output_file_sig, sep = "\t", row.names = FALSE, quote = FALSE)
+cat(sprintf("Significant results saved: %s\n", output_file_sig))
 
 # Clean memory
-rm(exp_cancer, exp_PC, covariates, rt_cor_total, result_list, rt_cor_sig, te_chunks, shared_sample,
-   pan_cli, pan_cli_c, purity)
+rm(exp_cancer, exp_drug, covariates, rt_cor_total, result_list, 
+   rt_cor_sig, te_chunks, shared_sample, pan_cli, pan_cli_c, purity)
 gc()
 
 cat(paste0("Completed: ", Cancer, "\n"))
